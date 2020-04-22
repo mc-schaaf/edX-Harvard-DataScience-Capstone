@@ -1,0 +1,11 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+report_cache
+report_files
+ml-10M100K
+*.csv
+*html
+*bib
+

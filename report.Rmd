@@ -1,0 +1,1167 @@
+---
+title: "Predicting Movie Ratings"
+subtitle: "Why Matrix Factorization Beats Additive Models"
+author: "Moritz C. Schaaf"
+date: "`r Sys.Date()`"
+
+link-citations: yes
+colorlinks: yes
+graphics: yes
+urlcolor: blue
+description: This report is part of the HarvardX - Introduction to data science course. It was created by Moritz Schaaf as a course submission for peer-review grading.
+always_allow_html: yes  
+
+geometry: "left=1in, right=1in, top=1.25in, bottom=1.25in"
+lot: false
+lof: false
+output:
+  pdf_document:
+    df_print: kable
+    highlight: pygments
+    toc: yes
+    
+    number_sections: false
+    
+
+---
+\newpage
+# Introduction
+
+This report is part of the HarvardX [Data Science Series](https://www.edx.org/professional-certificate/harvardx-data-science)^[https://www.edx.org/professional-certificate/harvardx-data-science] capstone project. The R and R Markdown codes are also available on [GitHub](https://github.com/mc-schaaf/edX-Harvard-DataScience)^[https://github.com/mc-schaaf/edX-Harvard-DataScience].
+
+In this report I will be creating a movie recommendation system. Recommendation systems - sometimes also called recommender platform or engine - try to quantify the interest a particular user is going to have for a particular item. Well known applications are for example the suggestions of YouTube, Spotify or Netflix. However, even online newspapers or [public libraries](http://www.bibtip.com/en)^[http://www.bibtip.com/en] have started to incorporate recommendation engines. In 2006, Netflix raised public awareness when it held an [open competition](https://en.wikipedia.org/wiki/Netflix_Prize)^[https://en.wikipedia.org/wiki/Netflix_Prize] for the best algorithm to predict movie ratings. The grand price of US$1,000,000 was awarded three years later, as a team managed to outperform Netflix's own algorithm by over 10%. 
+But why bother? The gain for providers like Netflix is enormous: Not only do they increase the sales, but such systems do also decrease the effort for shopping (or selection of the desired item in general). Therefore, both customer and corporation benefit from sophisticated recommendation systems.
+
+The assignment for this report is similar to the Netflix challenge: A target prediction accuracy has to be beaten without using the dataset for the final evaluation of the created prediction algorithm.
+
+
+
+
+# Data and Pre-processing
+
+The data used is from MovieLens, a research lab of the University of Minnesota, and constists of about [10 million ratings](https://grouplens.org/datasets/movielens/10m/)^[https://grouplens.org/datasets/movielens/10m/]. This is only a subset of the [full dataset](https://grouplens.org/datasets/movielens/latest/)^[https://grouplens.org/datasets/movielens/latest/], which also is publicly available for download.  
+
+```{r setup, include=FALSE}
+  # clear workspace
+  rm(list = ls())
+  # load packages
+  # you need to load the librarys in this order due to masked functions!
+  if(!require(scales)) install.packages("scales")
+  if(!require(data.table)) install.packages("data.table")
+  if(!require(matrixStats)) install.packages("matrixStats")
+  if(!require(tidyverse)) install.packages("tidyverse")
+  if(!require(dslabs)) install.packages("dslabs")
+  if(!require(caret)) install.packages("caret")
+  if(!require(lubridate)) install.packages("lubridate")
+  if(!require(recosystem)) install.packages("recosystem")
+  if(!require(ggthemes)) install.packages("ggthemes")
+  # quote them in the appendix
+  # knitr::write_bib(c(
+  #   .packages(), 'scales', 'data.table', 'matrixStats'), 'packages.bib')
+
+  # cache everything to speed up knitting
+  knitr::opts_chunk$set(cache = TRUE)
+  # change this for different appearance
+  theme_set(theme_fivethirtyeight() + theme(axis.title = element_text()))
+  
+  # Don't forget to adjust your working space!
+  setwd("C:\\Users\\Moritz\\Desktop\\R_Stuff\\01_HarvardX\\movielens_project")
+```
+
+
+```{r load_data, include=FALSE}
+# Create edx set, validation set; protective loop so this process has to be performed only 
+# once not always when running this script
+  if (!("movielens_edx.csv" %in% Sys.glob("*.csv")))
+  {
+  
+  dl <- tempfile()
+  download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+  
+  ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                   col.names = c("userId", "movieId", "rating", "timestamp"))
+  
+  movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+  colnames(movies) <- c("movieId", "title", "genres")
+  movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                             title = as.character(title),
+                                             genres = as.character(genres))
+  
+  movielens <- left_join(ratings, movies, by = "movieId")
+  
+  
+  # Validation set will be 10% of MovieLens data
+  suppressWarnings(set.seed(1, sample.kind="Rounding"))
+  test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+  edx <- movielens[-test_index,]
+  temp <- movielens[test_index,]
+  
+  # Make sure userId and movieId in validation set are also in edx set
+  validation <- temp %>% 
+    semi_join(edx, by = "movieId") %>%
+    semi_join(edx, by = "userId")
+  
+  # Add rows removed from validation set back into edx set
+  removed <- anti_join(temp, validation)
+  edx <- rbind(edx, removed)
+  rm(dl, ratings, movies, test_index, temp, movielens, removed)
+  # Here starts non-edx-code
+  # Save the datasets so you dont have to redo the process above every time
+  # Delete validation set from workspace so you dont get tempted
+  fwrite(edx, "movielens_edx.csv")
+  fwrite(validation, "movielens_validation.csv")
+  rm(validation)
+  }
+  
+  # load local copy of edx dataset
+  if ("movielens_edx.csv" %in% Sys.glob("*.csv"))
+  {
+    edx <- fread("movielens_edx.csv")
+  }
+```
+
+The dataset includes ratings of `r unique(edx$userId) %>% length()` users and `r unique(edx$movieId) %>% length()` movies. 10 percent of the dataset is used to create the dataset for the final validation. After ensuring that all users and movies in the validation dataset are also in the one used to develop the recommendation system, the number of ratings totals to `r edx %>% nrow()`. For each rating, information about the user ID, the time of the rating, the title of the movie and the genre is given:
+
+```{r head_edx_dataset_1, echo = FALSE}
+edx %>% head()
+```
+
+We notice two things: First, the ``title`` column includes information on the release year of the movie, which we could possibly use. Second, the ``genre`` column list all genres that apply to this particular movie, separated by "|". This could cause problems later on, so we will inspect this later on. However, first we will take a look at the distribution of our variables:
+
+Ratings can range from 5 _stars_ (indicating a excellent rating) to 0.5 _stars_ (indicating a terrible movie). However, the ratings are not normaly distributed and half-star ratings appear to be very rare.
+
+```{r plot_ratings, echo=FALSE}
+ # define function that makes readable exponents
+  readable_exponents <- function(l) {
+    # turn in to character string in scientific notation
+    l <- format(l, scientific = TRUE)
+    l <- gsub("0e\\+00","0",l)
+    # quote the part before the exponent to keep all the digits
+    l <- gsub("^(.*)e", "'\\1'e", l)
+    # turn the 'e+' into plotmath format
+    l <- gsub("e\\+","e",l)
+    l <- gsub("e", "%*%10^", l)
+    l <- gsub("\\'1[\\.0]*\\'\\%\\*\\%", "", l)
+    # return this as an expression
+    parse(text=l)
+  }
+    
+  edx %>% ggplot() + geom_histogram(aes(x = rating), binwidth = 0.25) + 
+    geom_vline(xintercept = mean(edx$rating), color = "red") +
+    ggtitle("Distribution of Ratings", subtitle = "with mean") +
+    scale_y_continuous("Count", labels = readable_exponents) +
+    xlab("Rating")
+```
+
+These ratings are also not evenly distributed between users or movies. Blockbuster movies may get tens of thousands ratings whilst half the movies have less than 125 ratings. The same applies for users. Some are very active and produce tousands of ratings, but most have rated less than one hundred movies. However, after closer inspection we notice that whilst the number of ratings per movie seems log-normally distributed - including movies with only one or two ratings - the number of ratings per user seems to be "cut off" at the lower tail. One possible explanation for this could be that only active users are included in the 10M dataset. 
+
+```{r plot_movie_user, echo=FALSE, out.width= "50%"}
+  
+  users_n <- edx %>% group_by(userId) %>% dplyr::count()
+  users_n %>% ggplot() + geom_histogram(aes(x = n), bins = 50) + 
+    geom_vline(xintercept = quantile(users_n$n, probs = c(0.25, 0.5, 0.75)), color = "red") + 
+    geom_label(data = data.frame(x = c(1, 1, 1), y = c( 1, 1, 1)), 
+               aes(x = quantile(users_n$n, probs = c(0.25, 0.5, 0.75)), y = rep(4000, 3), 
+                   label = paste0("n =\n", quantile(users_n$n, probs = c(0.25, 0.5, 0.75))), color = "red")) +
+    scale_x_continuous("Ratings per User", trans = "log10", labels = readable_exponents) + 
+    theme(legend.position = "none") + scale_y_continuous("Count", labels = readable_exponents) +
+    ggtitle("Distribution of number of ratings per user", subtitle = "with 25%, 50% and 75% quantiles")
+  # most users have between 25 and 150 ratings; however, there are some users with 6000+ ratings
+  
+  movies_n <- edx %>% group_by(movieId) %>% dplyr::count()
+  movies_n %>% ggplot() + geom_histogram(aes(x = n), bins = 50) + 
+    geom_vline(xintercept = quantile(movies_n$n, probs = c(0.25, 0.5, 0.75)), color = "red") + 
+    geom_label(data = data.frame(x = c(1, 1, 1), y = c( 1, 1, 1)), 
+               aes(x = quantile(movies_n$n, probs = c(0.25, 0.5, 0.75)), y = rep(400, 3), 
+                   label = paste0("n =\n", quantile(movies_n$n, probs = c(0.25, 0.5, 0.75))), color = "red")) +
+    scale_x_continuous("Ratings per Movie", trans = "log10", labels = readable_exponents) + 
+    theme(legend.position = "none") + ylab("Count") + 
+    ggtitle("Distribution of number of ratings per movie", subtitle = "with 25%, 50% and 75% quantiles")
+  # most movies have between 25 and 1000 ratings; looks normally distributed
+```
+
+The ``genres`` column consists of `r edx$genres %>% unique() %>% length` unique categories. Most of the categories, however, apply to only very few movies:
+
+```{r plot_genres, echo = FALSE}
+  genres_n <- edx %>% group_by(genres, movieId) %>% dplyr::count() %>% group_by(genres) %>% dplyr::count()
+  genres_n %>% ggplot() + geom_histogram(aes(x = n, y = ifelse(..count..+0.1 > 0.1,..count..+0.1, 0)), bins = 50) + 
+    geom_vline(xintercept = quantile(genres_n$n, probs = c(0.25, 0.5, 0.75)), color = "red") + 
+    geom_label(data = data.frame(x = c(1, 1, 1), y = c( 1, 1, 1)), 
+               aes(x = quantile(genres_n$n, probs = c(0.25, 0.5, 0.75)), y = rep(50, 3), 
+                   label = paste0("n =\n", quantile(genres_n$n, probs = c(0.25, 0.5, 0.75))), color = "red")) +
+    scale_x_continuous("Movies per Genre", trans = "log10", labels = readable_exponents) + 
+    ylab("Count") + 
+    theme(legend.position = "none") + 
+    ggtitle("Distribution of number of movies per genre", subtitle = "with 25%, 50% and 75% quantiles")
+```
+
+When inspecting the content of the ``genres`` that only include one movie title the reason for this becomes clear. 
+
+```{r small_genres}
+  edx %>% group_by(genres, movieId) %>% count() %>% 
+  group_by(genres) %>% count() %>% filter(n < 2) %>% head()
+```
+
+Multiple genres are applied to most movies but separated by "|". To be able to use the information of the genre, this has to be converted to an easier format.
+
+Considering the first impressions above, we have to do a bit of data pre-processing. We want to extract information about the release date from the ``title`` variable. 
+
+```{r movieId_correction, include=FALSE}
+# Change movieId of "War of the Worlds (2005)"
+edx <- edx %>% mutate( 
+     movieId = ifelse(movieId == 64997, 34048, movieId)
+)
+```
+
+```{r release_year_extraction}
+# make a small subset that contains only 1 rating per movie
+one_per_film <- edx %>% group_by(title) %>% top_n(1, timestamp)
+
+# set up extraction pattern
+year_pattern <- "\\([0123456789]{4}\\)$"
+
+# Use pattern
+one_per_film <- one_per_film %>% ungroup() %>% mutate(
+  year = str_extract(title, year_pattern) %>% str_remove_all("\\(|\\)") %>% as.integer()
+  ,title = str_remove(title, paste0(" ", year_pattern))
+) 
+
+# merge back together
+edx <- edx %>% select(-title)
+one_per_film <- one_per_film %>% select(-c(userId, timestamp, genres, rating))
+edx <- full_join(edx, one_per_film, by = c("movieId"))
+
+edx %>% head()
+```
+
+Also, we want to wrangle the ``genres`` column into a matrix indicating whether a certain genre applies to a movie. Additionally, we will create a column which takes the first genre listed and defines it as the main genre. However, to keep the dataset manageable in size, we will not yet merge the matrix back to the original data frame:
+
+```{r genres_extraction}
+# make a small subset that contains only 1 rating per unique sting in the genres-column
+one_per_genres <- edx %>% group_by(genres) %>% top_n(1, timestamp)
+unique_genres <- one_per_genres$genres %>% str_split("\\|") %>% unlist() %>% unique()
+
+# Maybe the first genre listed is the main genre?
+one_per_genres <- one_per_genres %>% 
+  mutate(main_genre = str_split_fixed(genres, "\\|", n = 2)[1])
+
+# produce a logical matrix-like object if genre XY is in the genres column
+for (i in 1:length(unique_genres)) {
+  one_per_genres$V1 <- str_detect(one_per_genres$genres, unique_genres[i])
+  one_per_genres <- one_per_genres %>% rename(!!unique_genres[i] := "V1")
+}
+
+# shorten data frames
+one_per_genres <- one_per_genres %>% 
+  select(-c(userId, movieId, rating, timestamp, title, year))
+
+# show the structure of the first few columns 
+one_per_genres[,1:6] %>% head()
+```
+
+```{r rating_wrangling, include=FALSE}
+# wrangle timestamp of rating
+edx <- edx %>% mutate(
+  rating_year = year(as_datetime(timestamp)),
+  rating_day = lubridate::wday(as_datetime(timestamp), label = TRUE, locale = "US"),
+  rating_hour = hour(as_datetime(timestamp))
+)
+```
+
+# Quantification of Prediction Accuracy
+
+For creating a well performing algorithm, one has define what a _good_ or _bad_ prediction is. Binarizing could be a possibility, thus splitting ratings into _likes_ and _dislikes_. However, as we explored earlier, we are dealing with interval-scaled discrete ratings. Therefore, the size of the error can be taken as loss or costs. Two very commonly used loss functions are the mean absolute error (MAE) and mean sqared error (MSE). We define $y_{u,i}$ as the rating for movie $i$ by user $u$ with $N$ being the number of user/movie combinations and denote our prediction with $\hat{y}_{u,i}$. The loss functions are then defined as:
+
+$$
+\mbox{MAE} = {\frac{1}{N} \sum_{u,i}^{} \left|\hat{y}_{u,i} - y_{u,i} \right| }
+$$
+$$
+\mbox{MSE} = {\frac{1}{N} \sum_{u,i}^{} \left(\hat{y}_{u,i} - y_{u,i} \right)^2 }
+$$
+
+The difference is in the weight of error sizes: Whilst an error of size 1 results in a MAE and MSE of 1, an error of size 3 results in a MAE of 3 and MSE of 9. The MSE scales linear with the prediction errors. The MSE on the other hand weighs large errors especially high:
+
+```{r loss_functions_plot, echo=FALSE}
+dat <- data.frame(residual = seq(-2, 2, by = 0.1)) %>% mutate(MAE = abs(residual), MSE = residual^2) %>%
+  pivot_longer(cols = c(MAE, MSE), names_to = "loss_function")
+
+dat %>% ggplot(aes(x = residual, y = value, linetype = loss_function)) + geom_line() + scale_linetype("Loss function") + ggtitle("Loss size conditional on error size") + ylab("Loss Size") + xlab("Error Size")
+  
+```
+
+
+Whilst those two loss functions are easy to compute and have desireable mathematical properties, there are prediction tasks where loss functions might have different and asymmetric shapes. Imagine predicting the oxygen capacity a diver may need: Whilst bringing too much might result in heavier equipment, bringing too few might result in having to abort a scuba trip or even fatal accidents.
+However, the Netflix challenge used the typical error loss: they decided on a winner based on the root mean squared error (RMSE) on a test set. It has the same properties as the MSE (being heavily influenced by outliers for example) but is easier to interpret than the sqared version because it has the same unit as standard deviations and prediction errors. Thus, we will also use this common loss function and define as my personal project goal a RMSE of < 0.8567. This is the RMSE ["BellKor's Pragmatic Chaos" achieved](https://www.netflixprize.com/leaderboard.html)^[https://www.netflixprize.com/leaderboard.html] in order to win the million-dollar-prize. 
+
+
+
+# Building Different Models
+
+```{r data_splitting, include = FALSE}
+# Test set will be 10% of edx data
+suppressWarnings(set.seed(1, sample.kind = "Rounding"))
+test_index <- createDataPartition(y = edx$rating, times = 1, p = 0.1, list = FALSE)
+edx_train <- edx[-test_index,]
+tmp <- edx[test_index,]
+
+# Make sure userId and movieId in test set are also in train set
+edx_test <- tmp %>% 
+  semi_join(edx_train, by = "movieId") %>%
+  semi_join(edx_train, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(tmp, edx_test)
+edx_train <- rbind(edx_train, removed)
+if(nrow(edx) != nrow(edx_test) + nrow(edx_train)) {stop("Splitting into test/trains seems to have failed")}
+
+rm(edx, removed, tmp, test_index)
+
+# make lists containing x and y 
+y <- edx_train %>% pull(rating)
+x <- edx_train %>% select(-rating)
+edx_train <- list(y = y, x = x)
+
+y <- edx_test %>% pull(rating)
+x <- edx_test %>% select(-rating)
+edx_test <- list(y = y, x = x)
+
+rm(x,y)
+```
+
+Just like in the Netflix challenge, we will not touch the validation set until our final model is built. This prevents us from hillclimbing. However, to keep a "leaderboard" of the different models, we will again set aside 10 percent of our observations. The Netflix challenge used a similar approach, but mind the different semantics: I will be calling the training set ``edx_train``, the leaderboard-calculation set ``edx_test`` and the final validation set ``validation``.
+The training set consists of `r edx_train$x %>% nrow()` ratings and the leaderboard set includes `r edx_test$x %>% nrow` ratings.
+Let's define a function that computes our leaderboard RMSEs and do some baseline measurements!
+
+```{r fun_RMSE, echo=TRUE}
+fun_RMSE <- function(y_hat) {
+  RSS <- sum((y_hat - edx_test$y)^2)
+  RMSE <- sqrt(RSS/length(y_hat))
+  return(RMSE)
+}
+```
+
+
+## Baseline Measurements
+
+If we knew nothing at all about the data, we would have to guess every possible outcome with the same probability:
+
+```{r guessing, echo = TRUE}
+suppressWarnings(set.seed(1, sample.kind = "Rounding"))
+possible_outcomes <- c((1:10)/2)
+y_hat <- sample(possible_outcomes, size = length(edx_test$y), replace = TRUE)
+fun_RMSE(y_hat)
+```
+
+```{r leaderboard_guessing, include = FALSE}
+# open up dataframe to store the RSME results
+RMSE_results <- data.frame(Method = NA, RMSE = NA)
+# store it
+tmp_RMSE <- fun_RMSE(y_hat)
+RMSE_results[1,] <- c("Guessing with equal probabilities", tmp_RMSE)
+```
+
+This results in an average error of about two stars! This is really bad, we could do way better with estimating the outcome distribution from the ``train`` set:
+
+```{r guessing2, echo=TRUE}
+suppressWarnings(set.seed(1, sample.kind = "Rounding"))
+possible_outcomes <- c((1:10)/2)
+probs <- sapply(possible_outcomes, function(x){mean(x == edx_train$y)})
+y_hat <- sample(possible_outcomes, size = length(edx_test$y), replace = TRUE, prob = probs)
+fun_RMSE(y_hat)
+```
+
+```{r leaderboard_guessing2, include=FALSE}
+tmp_RMSE <- fun_RMSE(y_hat)
+RMSE_results <- rbind(RMSE_results, c("Guessing with estimated probabilities", tmp_RMSE))
+```
+
+We already manage to decrease our RMSE by about a half star! Not bad, but we know that the expected value is equal to the arithmetic mean. So why bother with guessing when we can always predict the same rating, the mean (which we know minimizes the RSME)?
+
+```{r mean, echo = TRUE}
+mu <- mean(edx_train$y)
+y_hat <- rep(mu, times = length(edx_test$y))
+fun_RMSE(y_hat)
+```
+
+```{r leaderboard_mean, include=FALSE}
+tmp_RMSE <- fun_RMSE(y_hat)
+RMSE_results <- rbind(RMSE_results, c("Guessing the estimated mean", tmp_RMSE))
+```
+
+We - again - managed to decrease the RMSE by about a half star. An educated guess is way better than a random guess!
+However, we always predict the same and regard everything else as an error. In mathematical notation we would write this model
+
+$$
+Y_{u,i} = \mu + \varepsilon_{u,i}
+$$
+
+where $\mu$ is the "true" rating for all users and $\varepsilon_{i,u}$ independent errors, or "noise". However, we know that not all movies are the same. Would **you** rate _The Matrix_ the same as it's succesors? 
+
+## Movie and User Effects
+
+This movie _effect_ or _bias_ ($b$) can be added to the model above. Our equation now states
+
+$$
+Y_{u,i} = \mu + b_i + \varepsilon_{u,i}
+$$
+
+We will estimate the movie effect $b_i$ from the data as average deviation from the mean for each movie:
+
+```{r movieeffect_unregularized, echo = TRUE}
+# estimate movie effects
+movie_bs <- cbind(edx_train$x, edx_train$y) %>% rename("true_y" = "edx_train$y") %>%
+  group_by(movieId) %>%
+  summarize(b_movie = mean(true_y - mu))
+
+# apply movie effects and compute RSME
+predictions <- data.frame(mu = mu, b_movie = edx_test$x %>%
+                            left_join(movie_bs, by = "movieId") %>%
+                            pull(b_movie))
+y_hat <- predictions %>% rowSums()
+fun_RMSE(y_hat)
+```
+
+```{r leaderboard_movieeffect_unregularized, include=FALSE}
+tmp_RMSE <- fun_RMSE(y_hat)
+RMSE_results <- rbind(RMSE_results, c("Unregulated movie effects", tmp_RMSE))
+```
+
+The same holds true for users. Some tend to rate every movie a perfect 5 stars whilst others are critical and discerning. If we augment the equation to account for user effects $b_u$
+
+$$
+Y_{u,i} = \mu + b_i + b_u + \varepsilon_{u,i}
+$$
+and estimate it as the average deviation from the mean for each user after accounting for movie effects
+
+```{r usereffect_unregularized, echo = TRUE}
+# estimate user effects
+user_bs <- cbind(edx_train$x, edx_train$y) %>% 
+  rename("true_y" = "edx_train$y") %>%
+  left_join(movie_bs, by = "movieId") %>%
+  group_by(userId) %>%
+  summarize(b_user = mean(true_y - (mu + b_movie)))
+
+# apply user effects and compute RSME
+predictions$b_user <- edx_test$x %>%
+  left_join(user_bs, by = "userId") %>%
+  pull(b_user)
+y_hat <- predictions %>% rowSums()
+fun_RMSE(y_hat)
+```
+
+```{r leaderboard_usereffect_unregularized, include=FALSE}
+tmp_RMSE <- fun_RMSE(y_hat)
+RMSE_results <- rbind(RMSE_results, c("Unregulated movie and user effects", tmp_RMSE))
+```
+
+we get a RMSE of `r tmp_RMSE %>% round(digits = 3)`. This is very close to the project goal and actually better than in the example from the subset included in the ``dslabs`` package. However, this is to be expected since we have a much larger data basis and our predictions therefore become more accurate by reducing the random "noise" from small samples.
+
+## Regularized Movie and User Effects
+
+Remember when we said that one large error increases our RMSE way more than many small errors? Therefore, we should be conservative and only trust our estimates when they are stable. We can "punish" uncertain predictions (predictions that stem from few samples) by shrinking them as a function of the observations that drive them.
+Consider again our estimation for the movie effects
+
+$$
+\hat{b}_i = \frac{1}{ n_i} \sum_{u=1}^{n_i} \left(Y_{u,i} - \hat{\mu}\right)
+$$
+
+which can be "shrunken" by introducing a penalty $\lambda$
+
+$$
+\hat{b}_i(\lambda) = \frac{1}{\lambda + n_i} \sum_{u=1}^{n_i} \left(Y_{u,i} - \hat{\mu}\right)
+$$
+
+As we don't know what lambda ($\lambda = 0$ means penalty-free estimate) yields the best RMSE, we can use cross-validation to select the optimal lambda. This, in addition, allows us to estimate the stability of the computed RMSE. 
+
+```{r lambda_movieeffects, include = FALSE}
+# Protective wrapper so this is not run every time - I have a really slow laptop sorry! 
+if (!"lamdas_movies.csv" %in% Sys.glob("*.csv")){
+  # some sensible lambda values
+  lambdas <- seq(0, 10, 0.25)
+  # 100 data partitions; overlapping
+  suppressWarnings(set.seed(1, sample.kind = "Rounding"))
+  RS_index <- createDataPartition(edx_train$y, times = 100, p = 0.1)
+  # create a funktion that gives RSMEs conditional on lambdas
+  fun_regularization <- function(lambdas, index){
+    # create data partitions
+    data_small <- cbind(edx_train$y, edx_train$x) %>% rename("true_y" = "edx_train$y") %>% select(true_y, movieId)
+    data_train <- data_small[-index,]
+    data_test_tmp <- data_small[index,]
+    # Make sure movieId is in both sets
+    data_test <- data_test_tmp %>% 
+      semi_join(data_train, by = "movieId")
+    removed <- anti_join(data_test_tmp, data_test)
+    data_train <- rbind(data_train, removed)
+    # create everything where lambda is not needed
+    tmp_mu <- mean(data_train$true_y)
+    just_the_sum <- data_train %>%
+      group_by(movieId) %>%
+      summarize(s = sum(true_y - tmp_mu), n_i = n())
+    # create the RMSE conditional on the lambda
+    rmses <- sapply(lambdas, function(l){
+      predicted_ratings <- data_test %>%
+        left_join(just_the_sum, by='movieId') %>%
+        mutate(b_i = s/(n_i+l)) %>%
+        mutate(pred = tmp_mu + b_i) %>%
+        pull(pred)
+      RMSE <- sqrt(mean((predicted_ratings - data_test$true_y)^2))
+      return(RMSE)
+    })
+    # give back only the RMSEs
+    return(rmses)
+  }
+  
+  # apply this function 100 times
+  lambda_RMSEs <- lapply(RS_index, function(x){
+    fun_regularization(lambdas, x)
+  })
+  
+  # write this to hard drive to make knitting faster
+  fwrite(lambda_RMSEs, "lamdas_movies.csv", sep = ",", dec = ".")
+}
+
+# local loading if possible
+if ("lamdas_movies.csv" %in% Sys.glob("*.csv")){
+  lambdas <- seq(0, 10, 0.25)
+  lambda_RMSEs <- fread("lamdas_movies.csv", sep = ",", dec = ".")
+}
+
+# I set lambda manually to the optimum as the function above takes very much time
+movie_lambda <- 2.25
+```
+
+```{r lambda_movieeffects_plot, echo=FALSE}
+# inspect the results
+lambda_RMSE_mean <- lambda_RMSEs %>% as.data.frame() %>% rowMeans()
+lambda_RMSE_sd <- lambda_RMSEs %>% as.data.frame %>% as.matrix() %>% rowSds()
+ggplot(data = NULL) + geom_point(aes(lambdas, lambda_RMSE_mean)) +
+  geom_errorbar(aes(x = lambdas, ymin = (lambda_RMSE_mean - lambda_RMSE_sd/sqrt(length(lambda_RMSEs))),
+                    ymax = (lambda_RMSE_mean + lambda_RMSE_sd/sqrt(length(lambda_RMSEs))))) +
+  ggtitle("RMSE conditional on Lambda", subtitle = "movie effect, cross-validation, errorbars indicate SE") + 
+  ylab("RMSE") + xlab("Lambda")
+```
+
+Note, however, that the variation in the RMSE is not only due to the lambda but in a big part due to the cross-validation method. We could also inspect the variation of the lambda-effect only. 
+
+```{r lambda_movieeffects_plot2, echo=FALSE}
+# inspect the results
+lambda_RMSE_base <- lambda_RMSEs[1,] %>% t()
+lambda_RMSE_mean <- lambda_RMSEs %>% as.data.frame() %>% as.matrix %>% sweep(2, lambda_RMSE_base) %>% rowMeans()
+lambda_RMSE_sd <- lambda_RMSEs %>% as.data.frame %>% as.matrix() %>% sweep(2, lambda_RMSE_base) %>% rowSds()
+ggplot(data = NULL) + geom_point(aes(lambdas, lambda_RMSE_mean)) +
+  geom_errorbar(aes(x = lambdas, ymin = (lambda_RMSE_mean - lambda_RMSE_sd/sqrt(length(lambda_RMSEs))),
+                    ymax = (lambda_RMSE_mean + lambda_RMSE_sd/sqrt(length(lambda_RMSEs))))) +
+  ggtitle("RMSE change conditional on Lambda", subtitle = "movie effect, cross-validation, errorbars indicate SE") + 
+  ylab("RMSE") + xlab("Lambda")
+```
+
+However, we need one lambda value, not a range of possible best lambda values, so this is of less interest for us than the range of RMSEs we might have with the validation set. Thus, we select `r lambdas[which.min(lambda_RMSE_mean)]` as optimal lambda value for the movie effect.
+
+```{r movieeffect_regularized, echo = TRUE}
+# estimate movie effects with regularization
+movie_bs <- cbind(edx_train$x, edx_train$y) %>% rename("true_y" = "edx_train$y") %>%
+  group_by(movieId) %>%
+  summarize(
+    s = sum(true_y - mu), 
+    n_i = n()) %>% 
+  mutate(
+      b_movie = s/(n_i+movie_lambda)
+      ) %>%
+  select(movieId, b_movie)
+
+# apply movie effects and compute RSME
+predictions <- data.frame(mu = mu, b_movie = edx_test$x %>%
+                            left_join(movie_bs, by = "movieId") %>%
+                            pull(b_movie))
+y_hat <- predictions %>% rowSums()
+fun_RMSE(y_hat)
+```
+
+```{r leaderboard_movieeffect_regularized, include = FALSE}
+tmp_RMSE <- fun_RMSE(y_hat)
+RMSE_results <- rbind(RMSE_results, c("Regulated movie effects", tmp_RMSE))
+```
+
+
+
+```{r lambda_usereffects, include = FALSE}
+# Protective wrapper so this is not run every time - I have a really slow laptop sorry! 
+if (!"lamdas_users.csv" %in% Sys.glob("*.csv")){
+  # some sensible lambda values
+  lambdas <- seq(0, 10, 0.25)
+  # 100 data partitions; overlapping
+  suppressWarnings(set.seed(1, sample.kind = "Rounding"))
+  RS_index <- createDataPartition(edx_train$y, times = 100, p = 0.1)
+  data_small <- cbind(edx_train$y, edx_train$x) %>% rename("true_y" = "edx_train$y") %>% 
+    left_join(movie_bs, by = "movieId") %>% mutate(
+      residual = true_y - (mu + b_movie)
+    ) %>% select(residual, userId)
+  # create a funktion that gives RSMEs conditional on lambdas
+  fun_regularization <- function(lambdas, index){
+    # create data partitions
+    data_train <- data_small[-index,]
+    data_test_tmp <- data_small[index,]
+    # Make sure userId is in both sets
+    data_test <- data_test_tmp %>% 
+      semi_join(data_train, by = "userId")
+    removed <- anti_join(data_test_tmp, data_test)
+    data_train <- rbind(data_train, removed)
+    # create everything where lambda is not needed
+    tmp_mu <- mean(data_train$residual)
+    just_the_sum <- data_train %>%
+      group_by(userId) %>%
+      summarize(s = sum(residual - tmp_mu), n_i = n())
+    # create the RMSE conditional on the lambda
+    rmses <- sapply(lambdas, function(l){
+      predicted_ratings <- data_test %>%
+        left_join(just_the_sum, by='userId') %>%
+        mutate(b_i = s/(n_i+l)) %>%
+        mutate(pred = tmp_mu + b_i) %>%
+        pull(pred)
+      RMSE <- sqrt(mean((predicted_ratings - data_test$residual)^2))
+      return(RMSE)
+    })
+    # give back only the RMSEs
+    return(rmses)
+  }
+  # apply this function 100 times
+  lambda_RMSEs <- lapply(RS_index, function(x){
+    fun_regularization(lambdas, x)
+  })
+  # write this to hard drive to make knitting faster
+  fwrite(lambda_RMSEs, "lamdas_users.csv", sep = ",", dec = ".")
+}
+
+# local loading if possible
+if ("lamdas_users.csv" %in% Sys.glob("*.csv")){
+  lambdas <- seq(0, 10, 0.25)
+  lambda_RMSEs <- fread("lamdas_movies.csv", sep = ",", dec = ".")
+}
+
+# I set lambda manually to the optimum as the function above takes very much time
+user_lambda <- 5
+```
+
+The same priciple can be applied to the user effect which produces the best RMSE for $\lambda_u$ = `r lambdas[which.min(lambda_RMSE_mean)]`. When computing the RMSE for our leaderboard set with the new lambda, 
+
+```{r usereffect_regularized, echo = TRUE}
+# estimate user effects with regularization
+user_bs <- cbind(edx_train$x, edx_train$y) %>% rename("true_y" = "edx_train$y") %>%
+  left_join(movie_bs, by = "movieId") %>% mutate(
+    residual = true_y - (mu + b_movie)) %>%
+  group_by(userId) %>%
+  summarize(
+    s = sum(residual), 
+    n_i = n()) %>% 
+  mutate(
+    b_user = s/(n_i + user_lambda)
+  ) %>%
+  select(userId, b_user)
+
+# apply user effects and compute RSME
+predictions$b_user <- edx_test$x %>%
+  left_join(user_bs, by = "userId") %>%
+  pull(b_user)
+y_hat <- predictions %>% rowSums()
+fun_RMSE(y_hat)
+```
+
+```{r leaderboard_usereffect_regularized, include = FALSE}
+tmp_RMSE <- fun_RMSE(y_hat)
+RMSE_results <- rbind(RMSE_results, c("Regulated movie and user effects", tmp_RMSE))
+```
+
+we decrease the RMSE to `r tmp_RMSE %>% round(digits = 3)`. This is only 0.001 better than the unregularized version. How come? As with the good performance of the unregularized effects this is due to the the large dataset. With this many ratings, there are only very few movies/ users that produce unstable estimates. However, it still produces _some_ improvement, so we will keep the regularized $b$'s instead of the unregularized.
+
+## Grouping Users Movies
+
+The next approach that comes to one's mind is adding a term that accounts for similarity between movies. Sci-Fi movies are rated differently than Romantic comedies, aren`t they? May we be able to use the information on the movies genre? A hands on approach to this is to simply define a movies $i$'s only genre $q$ as the first genre that is listed. 
+
+$$
+Y_{u,i} = \mu + b_i + b_u + q_i + \varepsilon_{u,i}
+$$
+We will incorporate regularization directly and compute the leaderbord RMSE only with the optimal lambda.
+
+```{r lambda_genreeffects, include = FALSE}
+# Protective wrapper so this is not run every time - I have a really slow laptop sorry! 
+if (!"lamdas_genres.csv" %in% Sys.glob("*.csv")){
+  # some sensible lambda values
+  lambdas <- seq(0, 10000, 100)
+  # 100 data partitions; overlapping
+  suppressWarnings(set.seed(1, sample.kind = "Rounding"))
+  RS_index <- createDataPartition(edx_train$y, times = 100, p = 0.1)
+  data_small <- cbind(edx_train$y, edx_train$x) %>% rename("true_y" = "edx_train$y") %>% 
+    left_join(movie_bs, by = "movieId") %>% 
+    left_join(user_bs, by = "userId") %>% 
+    left_join(one_per_genres, by = "genres") %>% mutate(
+      residual = true_y - (mu + b_movie + b_user)
+    ) %>% select(residual, main_genre)
+  # create a funktion that gives RSMEs conditional on lambdas
+  fun_regularization <- function(lambdas, index){
+    # create data partitions
+    data_train <- data_small[-index,]
+    data_test_tmp <- data_small[index,]
+    # Make sure genre is in both sets
+    data_test <- data_test_tmp %>% 
+      semi_join(data_train, by = "main_genre")
+    removed <- anti_join(data_test_tmp, data_test)
+    data_train <- rbind(data_train, removed)
+    # create everything where lambda is not needed
+    tmp_mu <- mean(data_train$residual)
+    just_the_sum <- data_train %>%
+      group_by(main_genre) %>%
+      summarize(s = sum(residual - tmp_mu), n_i = n())
+    # create the RMSE conditional on the lambda
+    rmses <- sapply(lambdas, function(l){
+      predicted_ratings <- data_test %>%
+        left_join(just_the_sum, by='main_genre') %>%
+        mutate(b_i = s/(n_i+l)) %>%
+        mutate(pred = tmp_mu + b_i) %>%
+        pull(pred)
+      RMSE <- sqrt(mean((predicted_ratings - data_test$residual)^2))
+      return(RMSE)
+    })
+    # give back only the RMSEs
+    return(rmses)
+  }
+  # apply this function 100 times
+  lambda_RMSEs <- lapply(RS_index, function(x){
+    fun_regularization(lambdas, x)
+  })
+  # write this to hard drive to make knitting faster
+  fwrite(lambda_RMSEs, "lamdas_genres.csv", sep = ",", dec = ".")
+}
+# local loading if possible
+if ("lamdas_users.csv" %in% Sys.glob("*.csv")){
+  lambdas <- seq(0, 10000, 100)
+  lambda_RMSEs <- fread("lamdas_genres.csv", sep = ",", dec = ".")
+}
+
+# I set lambda manually to the optimum as the function above takes very much time
+genre_lambda <- 1800
+```
+
+```{r lambda_genreeffects_plot, echo=FALSE}
+ # inspect the results
+ lambda_RMSE_mean <- lambda_RMSEs %>% as.data.frame() %>% rowMeans()
+ lambda_RMSE_sd <- lambda_RMSEs %>% as.data.frame %>% as.matrix() %>% rowSds()
+ ggplot(data = NULL) + geom_point(aes(lambdas, lambda_RMSE_mean)) + 
+    geom_errorbar(aes(x = lambdas, ymin = (lambda_RMSE_mean - lambda_RMSE_sd/sqrt(length(lambda_RMSEs))), 
+                      ymax = (lambda_RMSE_mean + lambda_RMSE_sd/sqrt(length(lambda_RMSEs))))) + 
+    ggtitle("RMSE conditional on Lambda", subtitle = "genre effect, cross-validation, errorbars indicate SE") + 
+  ylab("RMSE") + xlab("Lambda")
+```
+
+We see that the effect of constraining the size of biases is only very limited here. Again, this is due to the (now even larger) samples that are used to compute the effects. However, again, we take whatever improvement we can get und thus end up with a lambda of `r lambdas[which.min(lambda_RMSE_mean)]` for the genre effect.
+When applying this to the leaderboard set
+
+```{r genreeffect_regularized, echo = TRUE}
+# estimate genre effects with regularization
+genre_bs <- cbind(edx_train$x, edx_train$y) %>% rename("true_y" = "edx_train$y") %>%
+  left_join(movie_bs, by = "movieId") %>% 
+  left_join(user_bs, by = "userId") %>% 
+  left_join(one_per_genres, by = "genres") %>% mutate(
+    residual = true_y - (mu + b_movie + b_user)) %>%
+  group_by(main_genre) %>%
+  summarize(
+    s = sum(residual), 
+    n_i = n()) %>% 
+  mutate(
+    b_genre = s/(n_i + genre_lambda)
+  ) %>%
+  select(main_genre, b_genre)
+
+# apply genre effects and compute RSME
+predictions$b_genre <- edx_test$x %>% 
+  left_join(one_per_genres, by = "genres") %>%
+  left_join(genre_bs, by = "main_genre") %>%
+  pull(b_genre)
+y_hat <- predictions %>% rowSums()
+fun_RMSE(y_hat)
+```
+
+```{r leaderboard_genreeffect_regularized, include = FALSE}
+tmp_RMSE <- fun_RMSE(y_hat)
+RMSE_results <- rbind(RMSE_results, c("Adding a genre effect", tmp_RMSE))
+```
+
+we have a RMSE of `r tmp_RMSE %>% round(digits = 3)`. This is surprising, isn`t it?
+
+## User-Genre-Interaction: Actually recommending 
+
+Actually, not at all. We adjusted for the movie effect when computing the genre effect. Thus, the genre gives close to no _additional_ information above the movie ratings. The effect we had in mind is actually not a genre effect, but agenre-user _interaction_ effect. Some users like particular genres better whilst disliking others. We try to predict the entertainment value of a movie for a person, given the rating of similar movies. In our formula we have to add this interaction as 
+
+$$
+Y_{u,i} = \mu + b_i + b_u + p_u q_i + \varepsilon_{u,i}
+$$
+
+with $q_i$ the hands-on variable we alrady introduced before and $p_u$ a persons particular liking of the genres. However, note that this is the first time we actually recommend different movies to different users. Before, we always recommended the same movies to everyone, but predicted different ratings. Does the RMSE reflect this extension of validity? Again, we compute the RMSE with a cross-validated lambda.
+
+```{r lambda_IAeffects, include = FALSE}
+# Protective wrapper so this is not run every time - I have a really slow laptop sorry! 
+if (!"lamdas_IA.csv" %in% Sys.glob("*.csv")){
+  # some sensible lambda values
+  lambdas <- seq(0, 100, 2.5)
+  # 100 data partitions; overlapping
+  suppressWarnings(set.seed(1, sample.kind = "Rounding"))
+  RS_index <- createDataPartition(edx_train$y, times = 100, p = 0.1)
+  data_small <- cbind(edx_train$y, edx_train$x) %>% rename("true_y" = "edx_train$y") %>% 
+    left_join(movie_bs, by = "movieId") %>% 
+    left_join(user_bs, by = "userId")  %>% 
+    left_join(one_per_genres, by = "genres")%>% 
+    left_join(genre_bs, by = "main_genre") %>% mutate(
+      residual = true_y - (mu + b_movie + b_user + b_genre)
+    ) %>% select(residual, main_genre, userId)
+  # create a funktion that gives RSMEs conditional on lambdas
+  fun_regularization <- function(lambdas, index){
+    # create data partitions
+    data_train <- data_small[-index,]
+    data_test_tmp <- data_small[index,]
+    # Make sure genre is in both sets
+    data_test <- data_test_tmp %>% 
+      semi_join(data_train, by = c("main_genre", "userId"))
+    removed <- anti_join(data_test_tmp, data_test)
+    data_train <- rbind(data_train, removed)
+    # create everything where lambda is not needed
+    tmp_mu <- mean(data_train$residual)
+    just_the_sum <- data_train %>%
+      group_by(main_genre, userId) %>%
+      summarize(s = sum(residual - tmp_mu), n_i = n())
+    # create the RMSE conditional on the lambda
+    rmses <- sapply(lambdas, function(l){
+      predicted_ratings <- data_test %>%
+        left_join(just_the_sum, by= c("main_genre" , "userId")) %>%
+        mutate(b_i = s/(n_i+l)) %>%
+        mutate(pred = tmp_mu + b_i) %>%
+        pull(pred)
+      RMSE <- sqrt(mean((predicted_ratings - data_test$residual)^2))
+      return(RMSE)
+    })
+    # give back only the RMSEs
+    return(rmses)
+  }
+  # apply this function 100 times
+  lambda_RMSEs <- lapply(RS_index, function(x){
+    fun_regularization(lambdas, x)
+  })
+  # write this to hard drive to make knitting faster
+  fwrite(lambda_RMSEs, "lamdas_IA.csv", sep = ",", dec = ".")
+}
+
+# local loading if possible
+if ("lamdas_IA.csv" %in% Sys.glob("*.csv")){
+  lambdas <- seq(0, 100, 2.5)
+  lambda_RMSEs <- fread("lamdas_IA.csv", sep = ",", dec = ".")
+}
+
+# I set lambda manually to the optimum as the function above takes very much time
+IA_lambda <- 22.5
+```
+
+```{r lambda_IAeffects_plot, echo=FALSE}
+# inspect the results
+  lambda_RMSE_mean <- lambda_RMSEs %>% as.data.frame() %>% rowMeans()
+  lambda_RMSE_sd <- lambda_RMSEs %>% as.data.frame %>% as.matrix() %>% rowSds()
+  ggplot(data = NULL) + geom_point(aes(lambdas, lambda_RMSE_mean)) + 
+    geom_errorbar(aes(x = lambdas, ymin = (lambda_RMSE_mean - lambda_RMSE_sd/sqrt(length(lambda_RMSEs))), 
+                      ymax = (lambda_RMSE_mean + lambda_RMSE_sd/sqrt(length(lambda_RMSEs))))) + 
+    ggtitle("RMSE conditional on Lambda", subtitle = "interaction effect, cross-validation, errorbars indicate SE") +
+    ylab("RMSE") + xlab("Lambda")
+```
+
+This plot looks promising and shows us that the interaction without regularization would not have improved but actually worsened our RMSE. When computing the RMSE on the loaderboard set with the optimal lambda of `r lambdas[which.min(lambda_RMSE_mean)]`, 
+
+```{r IAeffect_regularized, echo = TRUE}
+# estimate genre-user interaction with regularization
+IA_bs <- cbind(edx_train$x, edx_train$y) %>% rename("true_y" = "edx_train$y") %>%
+  left_join(movie_bs, by = "movieId") %>% 
+  left_join(user_bs, by = "userId") %>% 
+  left_join(one_per_genres, by = "genres") %>%
+  left_join(genre_bs, by = "main_genre") %>% mutate(
+    residual = true_y - (mu + b_movie + b_user + b_genre)) %>%
+  group_by(userId, main_genre) %>%
+  summarize(
+    s = sum(residual), 
+    n_i = n()) %>% 
+  mutate(
+    b_IA = s/(n_i + IA_lambda)
+  ) %>%
+  select(userId, main_genre, b_IA)
+
+# apply genre-user interaction and compute RSME
+predictions$b_IA <- edx_test$x %>% 
+  left_join(one_per_genres, by = "genres") %>%
+  left_join(IA_bs, by = c("main_genre", "userId")) %>%
+  mutate(b_IA = ifelse(is.na(b_IA), 0, b_IA)) %>%
+  pull(b_IA)
+y_hat <- predictions %>% rowSums()
+fun_RMSE(y_hat)
+```
+
+```{r leaderboard_IAeffect_regularized, include = FALSE}
+tmp_RMSE <- fun_RMSE(y_hat)
+RMSE_results <- rbind(RMSE_results, c("Adding a genre - user interaction", tmp_RMSE))
+```
+
+we see that the RMSE is `r tmp_RMSE %>% round(digits = 3)` which is below the project goal. However, can we do even better?
+
+## Matrix Factorization Motivation
+
+The question remains if the hands-on approach to grouping the genres was ideal. If it was, the $b$'s should be independent from each other. Otherwise, we could use this similarity between genres to further improve our prediction. For demonstration purposes, we will look at the residuals from the leaderbard-set without the interaction biases. Also, because this is only for demonstration purposes and we don't want to crash R, we will only use genres and users with many ratings.
+
+```{r residual_correlations}
+# create a dataset that only contains userId, main genre and residuals
+genres_small <- edx_test$x %>% left_join(one_per_genres, by = "genres") %>% 
+  select(userId, main_genre, genres)
+genres_small$residuals <- edx_test$y - (predictions %>% select(-b_IA) %>% rowSums())
+  
+# Keep only genres and users that have many ratings
+genres_small <- genres_small %>%
+  group_by(userId, main_genre) %>%
+  summarize(residuals = mean(residuals)) %>%
+  ungroup() %>%
+  mutate(main_genre = as.factor(main_genre)) %>%
+  group_by(main_genre) %>%
+  filter(n() >= 500)%>%
+  group_by(userId) %>%
+  filter(n() >= 10)
+
+# convert it to a matrix where every row represents a user 
+# and every column a genre values are the residuals
+y <- genres_small %>% select(main_genre, residuals, userId) %>%
+  pivot_wider(names_from = main_genre, values_from = residuals) %>% as.matrix()
+rownames(y)<- y[,1]
+y <- y[,-1]
+
+# Plot a heatmap of the correlation pattern
+cor(y, use = "pairwise.complete.obs") %>% 
+  heatmap(col = RColorBrewer::brewer.pal(5, "Greys"), symm = TRUE)
+```
+
+We see that there is some substantial correlation between the genres that we could possibly use. Genres are not dichotomous (Fantasy: ``TRUE`` or ``FALSE``) but rather a continuum. Some movies incorporate aspects of both genres. However, our hands-on approach does ony allow for each movie to be in one genre. Fantasy and Sci-Fi, for example, are highly linked. Also you can have movies that are highly specific for their genre whilst others have gone out of a particular subculture into mainstream culture. 
+We could also try to quantify the similarity of different movies, users or genres by the data itself. Principal Component Analysis comes to mind, but we face a lot of missing data even after aggregating to the main genre level:
+
+```{r missing_data, echo=FALSE}
+suppressWarnings(set.seed(1, sample.kind = "Rounding"))
+ifelse(!is.na(y), 1, 0) %>% .[sample(1:nrow(y), 50),] %>% .[, order(-colSums(.))] %>%
+  t() %>% image(1:17, 1:50, ., xlab = "Genres", ylab = "50 random users", col = RColorBrewer::brewer.pal(5, "Greys"))
+abline(h=0:50+0.5, v=0:17+0.5, col = "grey33")
+title("Missing data, white indicates no data")
+```
+
+One could use 0 to replace the missing values. However, this decreases the variance of genres that have only very few ratings. Those are the genres that we are especially interested in! For demonstration purposes we will therefore use multiple imputation to fill the missing data and compute a principal component analysis based on this generated dataset:
+
+```{r pca, out.width="75%", fig.align = "center"}
+suppressWarnings(set.seed(1, sample.kind = "Rounding"))
+
+# impute a data set
+pca_md <- missMDA::imputePCA(y, ncp = 3)
+y_md <- pca_md$completeObs
+
+# compute a pca on this new data set
+pca <- prcomp(y_md)
+
+# plot the vaiability explained
+ggplot(aes(1:length(pca$sdev), (pca$sdev^2 / sum(pca$sdev^2))*100), data = NULL) + 
+  geom_point() + geom_line() +
+  scale_y_continuous(name = "% Variance Explained", limits = c(0,30)) + 
+  xlab("PCs") + ggtitle("Variance explained by Principal Components")
+```
+
+We see that we can wrangle the observed correlation patterns into a structure.
+
+```{r pca_structure, echo = FALSE}
+pca$rotation %>% as.data.frame() %>% mutate(genres = rownames(.)) %>% 
+  ggplot(aes(PC1, PC2, label = genres)) + geom_point() + ggrepel::geom_text_repel(size = 3) +
+  ggtitle("Movies", subtitle = "on PC1 and PC2") + xlab("PC1") + ylab("PC2")
+```
+
+The first principal component seems to capture what I would call "Nerd-Favourites vs. Womans-Favourites" (Sci-Fi and Fantasy vs. Romance and Musical) whilst the second principal component captures the "Kids-Friendlieness" (Children and Animation vs. Horror and Thriller)
+We can see the basics of matrix factorization here. We try to explain a matrix of ratings by finding patterns and reducing the matrix to a matrix of smaller dimensions.
+However, we haven't used the ``lm()`` call throughout this course because it would crash R and instead found workarounds for our linear model with doing the _Type-I sum of squares decomposition_ by hand. Doing a matrix decomposition by hand would also crash R. However, finding a workaround is beyond the scope of this report. Luckily, R packages exist for (almost) everything and so we will use the ``recosystem`` package to use matrix factorization on our data set.
+
+## Matrix Factorization
+The ``recosystem`` package is pretty straight forward. It's purpose is to provide tools to build a recommendation system with. The operations are directly implemented in C++ and allow to write objects on the hard drive directly, thus lowering the system requirements.
+
+```{r recosystem_NOTRUN, eval = FALSE}
+# initialize reco
+library(recosystem)
+r = Reco()
+
+# create a dataset with only rating, userId and movieId
+reco_train <- edx_train$x %>% cbind(edx_train$y) %>% rename("y" = "edx_train$y") %>%
+  left_join(movie_bs, by = "movieId") %>% 
+  left_join(user_bs, by = "userId") %>% 
+  left_join(one_per_genres, by = "genres") %>%
+  left_join(genre_bs, by = "main_genre") %>%
+  mutate(residual = y - (mu + b_movie + b_user + b_genre)) %>%
+  select(userId, movieId, y)
+
+# reco wants a special data format
+reco_train <-  with(reco_train, 
+                    data_memory(user_index = userId, item_index = movieId, 
+                                rating = y, index1 = TRUE))
+
+# try some tuning parameters, 3-fold cross validation is enough
+opts = r$tune(reco_train, 
+              opts = list(dim = c(5, 10, 20, 50), 
+                          lrate = c(0.1, 0.2),
+                          costp_l1 = c(0), costq_l1 = c(0),
+                          costp_l2 = c(0, 0.01, 0.1, 0.3), 
+                          costq_l2 = c(0, 0.01, 0.1, 0.3),
+                          nthread = 4, niter = 20, nfold = 3))
+best_options <- opts$min
+
+# train the model with the best parameters
+suppressWarnings(set.seed(1, sample.kind = "Rounding"))
+r$train(reco_train, opts = c(best_options, niter = 50, verbose = FALSE))
+
+# create evaluation dataset
+reco_test <- edx_test$x %>% select(userId, movieId)
+reco_test <-  with(reco_test, 
+                   data_memory(user_index = userId, item_index = movieId, index1 = TRUE))
+
+# create predictions and test them
+y_hat <- r$predict(reco_test, out_memory())
+fun_RMSE(y_hat)
+```
+
+```{r recosystem_fast, echo=FALSE}
+# initialize reco
+library(recosystem)
+r = Reco()
+
+# create a dataset with only rating, userId and movieId
+reco_train <- edx_train$x %>% cbind(edx_train$y) %>% rename("y" = "edx_train$y") %>%
+  left_join(movie_bs, by = "movieId") %>% 
+  left_join(user_bs, by = "userId") %>% 
+  left_join(one_per_genres, by = "genres") %>%
+  left_join(genre_bs, by = "main_genre") %>%
+  mutate(residual = y - (mu + b_movie + b_user + b_genre)) %>%
+  select(userId, movieId, y)
+
+# reco wants a special data format
+reco_train <-  with(reco_train, 
+                    data_memory(user_index = userId, item_index = movieId, rating = y, index1 = TRUE))
+
+# I set the optimal parameters by hand as the computation above takes hours on my device.
+# Go ahead and give it a try if you possess a modern stationary PC. But don't forget to set the number of threads accordingly
+best_options <- list(dim = 50, lrate = 0.1,
+                     costp_l1 = 0, costq_l1 = 0,
+                     costp_l2 = 0.01, costq_l2 = 0.1,
+                     nthread = 4)
+
+# train the model with the best parameters
+suppressWarnings(set.seed(1, sample.kind = "Rounding"))
+r$train(reco_train, opts = c(best_options, niter = 50, verbose = FALSE))
+
+# create evaluation dataset
+reco_test <- edx_test$x %>% select(userId, movieId)
+reco_test <-  with(reco_test, 
+                   data_memory(user_index = userId, item_index = movieId, index1 = TRUE))
+
+# create predictions and test them
+y_hat <- r$predict(reco_test, out_memory())
+fun_RMSE(y_hat)
+```
+
+```{r leaderboard_reco, include=FALSE}
+tmp_RMSE <- fun_RMSE(y_hat)
+RMSE_results <- rbind(RMSE_results, c("recosystem package", tmp_RMSE))
+```
+
+We see that that the ``Reco()`` model does substantially better than our additive model. An overview of the progress we made during this model building process is provided by the following plot:
+
+```{r RMSE_overview, echo=FALSE}
+RMSE_results %>% mutate(
+  RMSE = RMSE %>% as.numeric(),
+  Method = Method %>% as_factor() %>% reorder(-as.numeric(.))
+  ) %>% 
+  ggplot(aes(Method, RMSE)) + geom_point() + theme(axis.text.x = element_text(angle = 90, size = 7)) +
+  ggtitle("RMSE of different\nprediction methods") + xlab(NULL) + ylab(NULL) + 
+  coord_flip()
+```
+
+
+# Applying the Best Model to the Validation Set
+
+We are way below our RMSE goal so it is time to re-train the best model with the whole ``edx`` dataset and compute the RMSE on the ``validation`` set!
+
+```{r final_model_NOTRUN, eval = FALSE}
+# read in validation set (I saved both sets locally)
+edx <- fread("movielens_edx.csv") %>% select(userId, movieId, rating)
+validation_predictors <- fread("movielens_validation.csv") %>% select(userId, movieId)
+
+# initialize Reco and wrangle data sets
+r = Reco()
+edx <-  with(edx, data_memory(user_index = userId, item_index = movieId, 
+                              rating = rating, index1 = TRUE))
+validation_predictors <-  with(validation_predictors, 
+                               data_memory(user_index = userId, 
+                                           item_index = movieId, index1 = TRUE))
+
+# train the reco system
+# consider lower number of iterations to speed things up
+suppressWarnings(set.seed(1, sample.kind = "Rounding"))
+r$train(edx, opts = c(best_options, niter = 1000, verbose = FALSE))
+
+# predict ratings
+y_hat <- r$predict(validation_predictors, out_memory())
+```
+
+```{r final_model_fast, include = FALSE}
+if (!"final_predictions.csv" %in% Sys.glob("*.csv")){
+  # read in validation set (I saved both sets locally)
+  edx <- fread("movielens_edx.csv") %>% select(userId, movieId, rating)
+  validation_predictors <- fread("movielens_validation.csv") %>% select(userId, movieId)
+  
+  # initialize Reco and wrangle data sets
+  r = Reco()
+  edx <-  with(edx, data_memory(user_index = userId, item_index = movieId, 
+                                rating = rating, index1 = TRUE))
+  validation_predictors <-  with(validation_predictors, 
+                                 data_memory(user_index = userId, 
+                                             item_index = movieId, index1 = TRUE))
+  
+  # train the reco system
+  # consider lower number of iterations to speed things up
+  suppressWarnings(set.seed(1, sample.kind = "Rounding"))
+  r$train(edx, opts = c(best_options, niter = 1000, verbose = FALSE))
+  
+  # predict ratings
+  y_hat <- r$predict(validation_predictors, out_memory())
+  
+  # save predictions to hard drive
+  fwrite(y_hat %>% as.list(), "final_predictions.csv", sep = ",", dec = ".")
+}
+
+if ("final_predictions.csv" %in% Sys.glob("*.csv")){
+y_hat <- fread("final_predictions.csv", sep = ",", dec = ".") %>% unlist()
+}
+```
+
+In addition we know that ratings below 0.5 and above 5.0 can not happen, so we are rescaling them to 0.5 and 5.0, respectively, before computing the final RMSE:
+
+```{r final_RMSE}
+# clip predictions
+y_hat <- ifelse(y_hat > 5, 5, ifelse(y_hat < 0.5, 0.5, y_hat))
+
+# show true values for the first time
+true_y <- fread("movielens_validation.csv") %>% pull(rating)
+
+# compute the final RMSE
+caret::RMSE(y_hat, true_y)
+```
+
+Our final RMSE is `r caret::RMSE(y_hat, true_y) %>% round(digits = 3)`. This surpasses the target RMSE by roughly 10%.
+
+# Conclusion
+
+We built a recommendation system from scratch. Our first approach was simply guessing the mean for all ratings. This cut the average error by about half compaired to randomly guessing! We then started adding up different effects until we encountered the insight that we were _predicting_, but not _recommending_. We then did a very naive approach to recommending by adding an interaction term to our linear model. 
+However, through analysis of the residuals we came to the conclusion that insights about _similarity_ should be driven by the data, not by an (kind of) arbitrary genre-label. 
+A powerful tool for sophisticated parallel matrix-factorization is the ``recosystem`` [package](https://cran.r-project.org/web/packages/recosystem/vignettes/introduction.html)^[https://cran.r-project.org/web/packages/recosystem/vignettes/introduction.html].
+With the model provided by reco we managed to achieve an even lower RMSE than the RMSE that Netflix payed 1 million dollars for!
+
+However, the data used to create and evaluate this model is different from the data in the Netflix challenge. Sadly, due to [privacy concerns](https://scholar.google.de/scholar?hl=de&as_sdt=0%2C5&q=Narayanan%2C+A.%2C+%26+Shmatikov%2C+V.+%282006%29.+How+to+break+anonymity+of+the+netflix+prize+dataset&btnG=)^[Narayanan, A., & Shmatikov, V. (2006). How to break anonymity of the netflix prize dataset.], the data is not publicly available anymore. Therefore, compairing the RMSE is hardly feasible. 
+Another limitation is the data we used to create the ratings: We only used ``userId`` and ``movieId`` in the final model, neglecting all other data at hand. Information about the time of the rating, release year or genres might improve our RMSE even further. Modern recommendation systems use many more predictors than our model. But such computations with a dataset this size is simply not feasible with a commodity laptop. 
+
