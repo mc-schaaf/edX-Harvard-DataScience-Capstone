@@ -63,9 +63,6 @@ The data used is from MovieLens, a research lab of the University of Minnesota, 
   knitr::opts_chunk$set(cache = TRUE)
   # change this for different appearance
   theme_set(theme_fivethirtyeight() + theme(axis.title = element_text()))
-  
-  # Don't forget to adjust your working space!
-  setwd("C:\\Users\\Moritz\\Desktop\\R_Stuff\\01_HarvardX\\movielens_project")
 ```
 
 
