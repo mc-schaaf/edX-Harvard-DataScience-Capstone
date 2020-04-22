@@ -37,7 +37,7 @@ The assignment for this report is similar to the Netflix challenge: A target pre
 
 
 
-# Data and Pre-processing
+# Methods: Data and Pre-processing
 
 The data used is from MovieLens, a research lab of the University of Minnesota, and constists of about [10 million ratings](https://grouplens.org/datasets/movielens/10m/)^[https://grouplens.org/datasets/movielens/10m/]. This is only a subset of the [full dataset](https://grouplens.org/datasets/movielens/latest/)^[https://grouplens.org/datasets/movielens/latest/], which also is publicly available for download.  
 
@@ -265,7 +265,7 @@ edx <- edx %>% mutate(
 )
 ```
 
-# Quantification of Prediction Accuracy
+# Methods: Quantification of Prediction Accuracy
 
 For creating a well performing algorithm, one has define what a _good_ or _bad_ prediction is. Binarizing could be a possibility, thus splitting ratings into _likes_ and _dislikes_. However, as we explored earlier, we are dealing with interval-scaled discrete ratings. Therefore, the size of the error can be taken as loss or costs. Two very commonly used loss functions are the mean absolute error (MAE) and mean sqared error (MSE). We define $y_{u,i}$ as the rating for movie $i$ by user $u$ with $N$ being the number of user/movie combinations and denote our prediction with $\hat{y}_{u,i}$. The loss functions are then defined as:
 
@@ -292,7 +292,7 @@ However, the Netflix challenge used the typical error loss: they decided on a wi
 
 
 
-# Building Different Models
+# Methods: Building Different Models
 
 ```{r data_splitting, include = FALSE}
 # Test set will be 10% of edx data
@@ -1080,7 +1080,7 @@ RMSE_results %>% mutate(
 ```
 
 
-# Applying the Best Model to the Validation Set
+# Results: Applying the Best Model to the Validation Set
 
 We are way below our RMSE goal so it is time to re-train the best model with the whole ``edx`` dataset and compute the RMSE on the ``validation`` set!
 
